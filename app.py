@@ -31,7 +31,7 @@ log = logging.getLogger("lc0-api")
 LC0_PATH = os.environ.get("LC0_PATH", "./lc0")
 WEIGHTS_PATH = os.environ.get("LC0_WEIGHTS", "./weights.pb.gz")
 LC0_BACKEND = os.environ.get("LC0_BACKEND", "eigen")  # CPU par défaut
-LC0_NODES = int(os.environ.get("LC0_NODES", "1"))
+LC0_NODES = int(os.environ.get("LC0_NODES", "10"))
 CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*").split(",")
 
 
@@ -96,12 +96,25 @@ class Lc0Engine:
         return await asyncio.wait_for(reader(), timeout=timeout)
 
     async def policy(self, fen: str, nodes: int = LC0_NODES) -> list[dict]:
-        """Retourne la liste brute [{uci, p, n, q}] triée par p desc."""
+        """Retourne la liste brute [{uci, p, n, q}] triée par p desc.
+
+        NB: on n'envoie PAS `ucinewgame` — ça flushe le cache du réseau
+        de neurones de Lc0. Garder la continuité maximise les hits NN
+        entre positions proches (très fréquent en minimax).
+        """
         async with self.lock:
-            await self._send("ucinewgame")
             await self._send(f"position fen {fen}")
             await self._send(f"go nodes {max(1, nodes)}")
             lines = await self._read_until("bestmove")
+        return _parse_verbose(lines)
+
+    async def policy_locked(self, fen: str, nodes: int) -> list[dict]:
+        """Variante sans lock — l'appelant doit déjà détenir self.lock.
+        Utilisée par /policy/batch pour enchaîner N positions sans
+        relâcher le lock ni envoyer ucinewgame entre les deux."""
+        await self._send(f"position fen {fen}")
+        await self._send(f"go nodes {max(1, nodes)}")
+        lines = await self._read_until("bestmove")
         return _parse_verbose(lines)
 
 
@@ -164,6 +177,12 @@ app.add_middleware(
 
 class PolicyRequest(BaseModel):
     fen: str = Field(..., description="Position au format FEN")
+    nodes: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description="Nombre de nodes Lc0 (1..10000). Défaut: LC0_NODES env.",
+    )
 
 
 @app.get("/health")
@@ -181,7 +200,9 @@ async def policy(req: PolicyRequest) -> dict:
     if board.is_game_over():
         raise HTTPException(status_code=409, detail="Position terminée")
 
-    rows = await engine.policy(req.fen)
+    nodes = req.nodes if req.nodes is not None else LC0_NODES
+    rows = await engine.policy(req.fen, nodes=nodes)
+
     # Filtre aux coups légaux (sécurité) + ajout du SAN
     legal_uci = {m.uci(): m for m in board.legal_moves}
     out: list[dict] = []
@@ -199,3 +220,56 @@ async def policy(req: PolicyRequest) -> dict:
     if not out:
         raise HTTPException(status_code=502, detail="Lc0 n'a renvoyé aucun coup")
     return {"fen": req.fen, "moves": out}
+
+
+class BatchRequest(BaseModel):
+    fens: list[str] = Field(..., min_length=1, max_length=512)
+    nodes: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description="Nombre de nodes Lc0 (1..10000). Défaut: LC0_NODES env.",
+    )
+
+
+@app.post("/policy/batch")
+async def policy_batch(req: BatchRequest) -> dict:
+    """Traite N positions en gardant Lc0 chaud (1 seul verrou, pas de
+    ucinewgame entre positions). Amortit la latence réseau et maximise
+    le cache NN. Les erreurs par position ne coupent pas le batch."""
+    nodes = req.nodes if req.nodes is not None else LC0_NODES
+    results: list[dict] = []
+    async with engine.lock:
+        for fen in req.fens:
+            try:
+                board = chess.Board(fen)
+            except ValueError as e:
+                results.append({"fen": fen, "error": f"FEN invalide: {e}"})
+                continue
+            if board.is_game_over():
+                results.append({"fen": fen, "error": "Position terminée"})
+                continue
+            try:
+                rows = await engine.policy_locked(fen, nodes=nodes)
+            except Exception as e:  # noqa: BLE001
+                log.exception("policy_batch: erreur Lc0 sur %s", fen)
+                results.append({"fen": fen, "error": f"Lc0: {e}"})
+                continue
+            legal_uci = {m.uci(): m for m in board.legal_moves}
+            moves: list[dict] = []
+            for r in rows:
+                mv = legal_uci.get(r["uci"])
+                if mv is None:
+                    continue
+                moves.append({
+                    "uci": r["uci"],
+                    "san": board.san(mv),
+                    "p": r["p"],
+                    "n": r["n"],
+                    "q": r["q"],
+                })
+            if not moves:
+                results.append({"fen": fen, "error": "Lc0 n'a renvoyé aucun coup"})
+            else:
+                results.append({"fen": fen, "moves": moves})
+    return {"results": results}
