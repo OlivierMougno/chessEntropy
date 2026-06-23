@@ -30,6 +30,31 @@ Réponse (triée par `p` décroissant) :
 
 Erreurs : `400` FEN invalide, `409` partie terminée, `502` parsing échoué.
 
+### `POST /policy/batch`
+Traite N positions en gardant Lc0 chaud (un seul verrou interne, pas de
+`ucinewgame` entre positions). Amortit la latence réseau et maximise les
+hits du cache du réseau de neurones — recommandé pour les algos qui
+enchaînent beaucoup d'évaluations proches (minimax, MCTS externe...).
+
+Requête :
+```json
+{ "fens": ["fen1", "fen2", "..."], "nodes": 10 }
+```
+Réponse (même ordre que `fens`, une entrée par position) :
+```json
+{
+  "results": [
+    { "fen": "fen1", "moves": [ { "uci": "e2e4", "san": "e4", "p": 0.18, "n": 0, "q": 0.02 } ] },
+    { "fen": "fen2", "error": "Position terminée" }
+  ]
+}
+```
+
+> **Note importante** : depuis cette version, `ucinewgame` n'est plus
+> envoyé entre les requêtes. C'est volontaire : Lc0 conserve son cache
+> NN entre positions, ce qui accélère beaucoup les évaluations sur des
+> positions proches (typique en minimax).
+
 ## Lancer en local (sans Docker)
 
 Prérequis : un binaire `lc0` dans le dossier (ou pointé par `LC0_PATH`)
