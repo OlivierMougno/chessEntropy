@@ -22,7 +22,7 @@ RUN git clone --depth 1 --branch ${LC0_REF} --recurse-submodules \
       https://github.com/LeelaChessZero/lc0.git
 
 WORKDIR /src/lc0
-RUN ./build.sh --backend=eigen -Dgtest=false
+RUN ./build.sh -Dgtest=false
 
 RUN curl -fL -o /weights.pb.gz "${WEIGHTS_URL}"
 
