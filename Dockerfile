@@ -3,7 +3,7 @@
 # Run  : docker run -p 8000:8000 lc0-policy-api
 #
 # Compile Lc0 avec backend CPU "eigen" (portable, pas besoin de GPU).
-# Pour un déploiement avec GPU CUDA, remplacer la base et `-Dbackend=cuda`.
+# Pour un déploiement avec GPU CUDA, remplacer la base et `--backend=cuda`.
 
 FROM python:3.12-slim AS build-lc0
 
@@ -22,7 +22,7 @@ RUN git clone --depth 1 --branch ${LC0_REF} --recurse-submodules \
       https://github.com/LeelaChessZero/lc0.git
 
 WORKDIR /src/lc0
-RUN ./build.sh -Dgtest=false -Dbackend=eigen
+RUN ./build.sh --backend=eigen -Dgtest=false
 
 RUN curl -fL -o /weights.pb.gz "${WEIGHTS_URL}"
 
